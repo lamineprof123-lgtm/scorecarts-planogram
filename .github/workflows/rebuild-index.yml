@@ -1,0 +1,18 @@
+name: Rebuild photo index
+on:
+  schedule: [{cron: "0 3 1 * *"}]
+  workflow_dispatch: {}
+permissions: {contents: write}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install pyarrow
+      - run: df -h . && python tools/build_index.py /tmp/offdata data/idx
+      - run: |
+          git config user.name "index-bot"; git config user.email "index-bot@users.noreply.github.com"
+          git add data/idx && (git diff --cached --quiet || git commit -m "Rebuild photo index $(date -u +%F)") && git push

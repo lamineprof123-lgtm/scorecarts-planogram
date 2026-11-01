@@ -358,6 +358,7 @@ textarea.field{resize:vertical;font:inherit;font-size:13px}
         <button class="btn2" id="offGo" type="button">Retry photos</button>
         <button class="link mute" id="photoBulk" type="button">Choose files…</button>
       </div>
+      <label class="chk"><input type="checkbox" id="offLive"> Also ask the live Open Food Facts search for products not in the photo index (slow, often busy)</label>
       <label class="chk"><input type="checkbox" id="offAuto" checked> Find photos automatically by product name (branded lines; generic catalog items keep their drawing)</label>
       <label class="chk"><input type="checkbox" id="usePhotos" checked> Show photos on the shelf</label>
       <div class="note small" id="photoStatus">Free Open Food Facts name search (about 10 searches a minute; results are cached on this device). Click a product's photo to choose another. Photos are auto-trimmed and light backgrounds removed in your browser, and saved on this device.</div>
@@ -2121,7 +2122,7 @@ async function hit(e,q){
     e.H.fails++; e.H.cool=Date.now()+Math.min(60000,5000*2**(e.H.fails-1)); return null; }
 }
 /* Returns {ranked, final}. final=false means only a scoped/partial answer came back (do not cache a miss). */
-async function offNameSearch(q){
+async function liveNameSearch(q){
   const tried=new Set(), deadline=Date.now()+45000; let best=[], final=false;
   const merge=list=>{ if(list&&list.length){ best=rankHits(q,[...best.map(x=>x.p),...list]); } };
   for(let round=0;round<4&&!final;round++){
@@ -2138,6 +2139,27 @@ async function offNameSearch(q){
     if(!final){ if(Date.now()>deadline) break; await sleep(3000*(round+1)); }
   }
   return {ranked:best,final,ep:"-"};
+}
+/* ---------- static product index (data/idx/<2-letter>.json, built from Open Food/Beauty/Products Facts exports) ---------- */
+const IDX_BASE=(window.SC_IDX_BASE||"data/idx/"), IDXC=new Map(), IMGH={f:"https://images.openfoodfacts.org",b:"https://images.openbeautyfacts.org",p:"https://images.openproductsfacts.org"};
+function idxKey(t){const n=norm(t).split(" ")[0]||""; return n?n.slice(0,2).padEnd(2,"_"):"";}
+function idxShard(k){ if(!IDXC.has(k)) IDXC.set(k,fetch(IDX_BASE+k+".json").then(r=>{ if(r.status===404) return []; if(!r.ok) throw new Error("HTTP "+r.status); return r.json(); }).catch(e=>{IDXC.delete(k); throw e;})); return IDXC.get(k); }
+function idxPath(c){ return c.length<=8?c:c.padStart(13,"0").replace(/^(\d{3})(\d{3})(\d{3})(\d+)$/,"$1/$2/$3/$4"); }
+function idxProd(e){ const [code,name,brands,qty,cat,img,src]=e, [l,rev]=img.split(".");
+  return {code,product_name:name,brands,quantity:qty,categories:cat,src,lang:l,image_front_url:`${IMGH[src]||IMGH.f}/images/products/${idxPath(code)}/front${l?"_"+l:""}.${rev}.400.jpg`}; }
+async function idxSearch(q){
+  const qt=wordToks(q); if(!qt.length) return {ranked:[],final:true,ep:"index"};
+  const keys=[...new Set(qt.slice(0,2).map(idxKey).filter(Boolean))];
+  const lists=await Promise.all(keys.map(idxShard));
+  const t0=qt[0], pool=[];
+  for(const L of lists) for(const e of L){ const hay=" "+norm(e[1]+" "+e[2])+" "; if(hay.includes(" "+t0)) pool.push(idxProd(e)); }
+  return {ranked:rankHits(q,pool),final:true,ep:"index"};
+}
+async function offNameSearch(q){
+  let r=null;
+  try{ r=await idxSearch(q); if(r.ranked.some(ACCEPT)) return r; }catch(e){ PQ.err=Date.now(); r={ranked:[],final:false,ep:"index-error"}; }
+  if($("offLive")&&$("offLive").checked){ const l=await liveNameSearch(q); if(l.ranked.some(ACCEPT)||!r.final) return l; }
+  return r;
 }
 /* ---------- matching ---------- */
 const STOP=new Set("the a and of with in for x pack bag box bottle can jar tin tub pouch roll rolls pcs pc pk flavour flavor new".split(" "));
@@ -2168,7 +2190,8 @@ function scoreHit(q,p){
   const extra=wordToks(p.product_name||"").filter(w=>!inQ(w)).length;
   const VAR=["max","zero","diet","light","lite","gold","decaf","free","mini","kids","junior","organic","spicy","hot","lemon","strawberry","chocolate","vanilla","xxl","xl","sour","sours","cherry","fruit","berry"];
   const varPen=wordToks(name).filter(w=>VAR.includes(w)&&!inQ(w)).length;   // "Pepsi Max" is not "Pepsi"
-  let sc=cover*2+(brandOk?1:-1.5)-Math.min(0.6,extra*0.1)-varPen*1.2;
+  const brandField=brands.some(bw=>bw.every(inQ));   // real brand match beats a name that merely starts with the word ("Persil" parsley vs Persil detergent)
+  let sc=cover*2+(brandOk?1:-1.5)+(brandField?0.8:0)-Math.min(0.6,extra*0.1)-varPen*1.2;
   const want=sizeKg(q), have=p.quantity?sizeKg(p.quantity):null;
   if(want&&have){ const r=Math.abs(want-have)/want; sc+=r<0.12?0.6:(r<0.35?0:-0.5); }
   if(!frontUrl(p)) sc-=5;
@@ -2191,7 +2214,7 @@ const PQ={later:[],err:0,retry:{},running:0,todo:[],done:0,total:0,found:0,miss:
 const MISS=new Set();      // image keys with no acceptable match
 let laterT=0; function laterSoon(){ if(laterT) return; laterT=setTimeout(()=>{laterT=0; const L=PQ.later.splice(0); if(!L.length) return;
   if(!(PQ.running||PQ.todo.length)){PQ.done=0;PQ.total=0;PQ.found=0;PQ.miss=0;PQ.t0=Date.now();}
-  L.forEach(x=>{ if(!QC.has(x.k)) {PQ.todo.push(x); PQ.total++;} }); photoProgress(); while(PQ.running<2&&PQ.todo.length) worker(); },60000); }
+  L.forEach(x=>{ if(!QC.has(x.k)) {PQ.todo.push(x); PQ.total++;} }); photoProgress(); while(PQ.running<6&&PQ.todo.length) worker(); },60000); }
 function photoProgress(){
   const b=$("photoBadge"), st=$("photoStatus");
   const busy=PQ.todo.length||PQ.running;
@@ -2218,7 +2241,7 @@ function autoPhotos(){
   if(!(PQ.running||PQ.total>PQ.done)){PQ.done=0;PQ.total=0;PQ.found=0;PQ.miss=0;PQ.t0=Date.now();}
   PQ.todo.sort((a,b)=>wordToks(a.q).length-wordToks(b.q).length||a.q.length-b.q.length);
   PQ.total+=add; photoProgress();
-  while(PQ.running<2&&PQ.todo.length) worker();
+  while(PQ.running<6&&PQ.todo.length) worker();
 }
 function skusFor(k){return items.map(i=>i.sku).filter(s=>qKey(photoQuery(s))===k);}
 async function applyCand(sku,c){
@@ -2458,7 +2481,7 @@ function renderAiBadge(){const b=$("aiBadge"); if(b) b.textContent=dsReady()?"De
 
 /* ---------- start: nothing chosen yet ---------- */
 renderRail(); renderStage(); initV2();
-window.__dbg={get:()=>({fx,cats,items,result,aiPlan}),resolve,IMG,hardOk,QC,MISS,EPS,imgFor,imgKey,dispImg,setImg:(s,v)=>{setImg(s,v);refreshSoon();}};
+window.__dbg={get:()=>({fx,cats,items,result,aiPlan}),resolve,IMG,hardOk,QC,MISS,EPS,imgFor,imgKey,dispImg,idxSearch,setImg:(s,v)=>{setImg(s,v);refreshSoon();}};
 
 })();
 </script>

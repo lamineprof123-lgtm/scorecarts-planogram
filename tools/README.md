@@ -1,0 +1,3 @@
+# Photo index
+`data/idx/<aa>.json` = static product-photo index (≈380k products with a front image, from Open Food Facts, Open Beauty Facts and Open Products Facts; Gulf/UK/South-Asia/Egypt/Philippines products + top 4,000 brands). Each row: `[code, name, brands, quantity, category, "<lang>.<rev>", source f|b|p]`; the page builds the image URL `images.open{food,beauty,products}facts.org/images/products/<path>/front_<lang>.<rev>.400.jpg`. Shards are keyed by the first two letters of the brand's and the name's first word.
+Rebuild: `pip install pyarrow && python3 tools/build_index.py /tmp/offdata data/idx` (downloads ~8 GB). GitHub Actions does this monthly (`.github/workflows/rebuild-index.yml`) or on manual dispatch.
